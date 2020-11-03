@@ -1,24 +1,56 @@
 /*
  * ASN.1 DER parsing
- * Copyright (c) 2006, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2006-2014, Jouni Malinen <j@w1.fi>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * Alternatively, this software may be distributed under the terms of BSD
- * license.
- *
- * See README and COPYING for more details.
+ * This software may be distributed under the terms of the BSD license.
+ * See README for more details.
  */
 
 #include "includes.h"
 
 #include "common.h"
-
-#ifdef CONFIG_INTERNAL_X509
-
 #include "asn1.h"
+
+struct asn1_oid asn1_sha1_oid = {
+	.oid = { 1, 3, 14, 3, 2, 26 },
+	.len = 6
+};
+
+struct asn1_oid asn1_sha256_oid = {
+	.oid = { 2, 16, 840, 1, 101, 3, 4, 2, 1 },
+	.len = 9
+};
+
+
+static int asn1_valid_der_boolean(struct asn1_hdr *hdr)
+{
+	/* Enforce DER requirements for a single way of encoding a BOOLEAN */
+	if (hdr->length != 1) {
+		wpa_printf(MSG_DEBUG, "ASN.1: Unexpected BOOLEAN length (%u)",
+			   hdr->length);
+		return 0;
+	}
+
+	if (hdr->payload[0] != 0 && hdr->payload[0] != 0xff) {
+		wpa_printf(MSG_DEBUG,
+			   "ASN.1: Invalid BOOLEAN value 0x%x (DER requires 0 or 0xff)",
+			   hdr->payload[0]);
+		return 0;
+	}
+
+	return 1;
+}
+
+
+static int asn1_valid_der(struct asn1_hdr *hdr)
+{
+	if (hdr->class != ASN1_CLASS_UNIVERSAL)
+		return 1;
+	if (hdr->tag == ASN1_TAG_BOOLEAN && !asn1_valid_der_boolean(hdr))
+		return 0;
+	return 1;
+}
+
 
 int asn1_get_next(const u8 *buf, size_t len, struct asn1_hdr *hdr)
 {
@@ -29,6 +61,10 @@ int asn1_get_next(const u8 *buf, size_t len, struct asn1_hdr *hdr)
 	pos = buf;
 	end = buf + len;
 
+	if (pos >= end) {
+		wpa_printf(MSG_DEBUG, "ASN.1: No room for Identifier");
+		return -1;
+	}
 	hdr->identifier = *pos++;
 	hdr->class = hdr->identifier >> 6;
 	hdr->constructed = !!(hdr->identifier & (1 << 5));
@@ -49,6 +85,10 @@ int asn1_get_next(const u8 *buf, size_t len, struct asn1_hdr *hdr)
 	} else
 		hdr->tag = hdr->identifier & 0x1f;
 
+	if (pos >= end) {
+		wpa_printf(MSG_DEBUG, "ASN.1: No room for Length");
+		return -1;
+	}
 	tmp = *pos++;
 	if (tmp & 0x80) {
 		if (tmp == 0xff) {
@@ -81,32 +121,21 @@ int asn1_get_next(const u8 *buf, size_t len, struct asn1_hdr *hdr)
 	}
 
 	hdr->payload = pos;
-	return 0;
+
+	return asn1_valid_der(hdr) ? 0 : -1;
 }
 
 
-int asn1_get_oid(const u8 *buf, size_t len, struct asn1_oid *oid,
-		 const u8 **next)
+int asn1_parse_oid(const u8 *buf, size_t len, struct asn1_oid *oid)
 {
-	struct asn1_hdr hdr;
 	const u8 *pos, *end;
 	unsigned long val;
 	u8 tmp;
 
 	os_memset(oid, 0, sizeof(*oid));
 
-	if (asn1_get_next(buf, len, &hdr) < 0 || hdr.length == 0)
-		return -1;
-
-	if (hdr.class != ASN1_CLASS_UNIVERSAL || hdr.tag != ASN1_TAG_OID) {
-		wpa_printf(MSG_DEBUG, "ASN.1: Expected OID - found class %d "
-			   "tag 0x%x", hdr.class, hdr.tag);
-		return -1;
-	}
-
-	pos = hdr.payload;
-	end = hdr.payload + hdr.length;
-	*next = end;
+	pos = buf;
+	end = buf + len;
 
 	while (pos < end) {
 		val = 0;
@@ -141,7 +170,27 @@ int asn1_get_oid(const u8 *buf, size_t len, struct asn1_oid *oid,
 }
 
 
-void asn1_oid_to_str(struct asn1_oid *oid, char *buf, size_t len)
+int asn1_get_oid(const u8 *buf, size_t len, struct asn1_oid *oid,
+		 const u8 **next)
+{
+	struct asn1_hdr hdr;
+
+	if (asn1_get_next(buf, len, &hdr) < 0 || hdr.length == 0)
+		return -1;
+
+	if (hdr.class != ASN1_CLASS_UNIVERSAL || hdr.tag != ASN1_TAG_OID) {
+		wpa_printf(MSG_DEBUG, "ASN.1: Expected OID - found class %d "
+			   "tag 0x%x", hdr.class, hdr.tag);
+		return -1;
+	}
+
+	*next = hdr.payload + hdr.length;
+
+	return asn1_parse_oid(hdr.payload, hdr.length, oid);
+}
+
+
+void asn1_oid_to_str(const struct asn1_oid *oid, char *buf, size_t len)
 {
 	char *pos = buf;
 	size_t i;
@@ -156,7 +205,7 @@ void asn1_oid_to_str(struct asn1_oid *oid, char *buf, size_t len)
 		ret = os_snprintf(pos, buf + len - pos,
 				  "%s%lu",
 				  i == 0 ? "" : ".", oid->oid[i]);
-		if (ret < 0 || ret >= buf + len - pos)
+		if (os_snprintf_error(buf + len - pos, ret))
 			break;
 		pos += ret;
 	}
@@ -206,4 +255,18 @@ unsigned long asn1_bit_string_to_long(const u8 *buf, size_t len)
 	return val;
 }
 
-#endif /* CONFIG_INTERNAL_X509 */
+
+int asn1_oid_equal(const struct asn1_oid *a, const struct asn1_oid *b)
+{
+	size_t i;
+
+	if (a->len != b->len)
+		return 0;
+
+	for (i = 0; i < a->len; i++) {
+		if (a->oid[i] != b->oid[i])
+			return 0;
+	}
+
+	return 1;
+}
