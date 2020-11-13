@@ -138,7 +138,7 @@ fi
 
 dl_adg(){
 logger -t "AdGuardHome" "下载AdGuardHome"
-wget -qO- "https://gh.api.99988866.xyz/https://github.com/AdguardTeam/AdGuardHome/releases/download/v0.104.1/AdGuardHome_linux_mipsle_softfloat.tar.gz" | tar xzf
+wget -qO- "https://gh.api.99988866.xyz/https://github.com/AdguardTeam/AdGuardHome/releases/download/v0.104.1/AdGuardHome_linux_mipsle_softfloat.tar.gz" | tar xz -C /tmp
 if [ ! -f "/tmp/AdGuardHome/AdGuardHome" ]; then
 logger -t "AdGuardHome" "AdGuardHome下载失败，请检查是否能正常访问github!程序将退出。"
 nvram set adg_enable=0
